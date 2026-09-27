@@ -12,9 +12,9 @@ local LIVE_TYPES   = { "live_hls", "live_playback_hls", "hls" }
 local RECORD_TYPES = { "full_hd", "high", "hls", "medium", "low", "lowest", "tiny" }
 
 -- Опции, которые VLC применит к элементу плейлиста
+-- ВАЖНО: не подменять User-Agent/Referer — ссылка подписана (sig) под
+-- агента, который запрашивал API (стандартный UA VLC), иначе CDN вернёт 400.
 local ITEM_OPTIONS = {
-  ":http-referrer="..REFERER,
-  ":http-user-agent="..UA,
   ":network-caching=10000",   -- 10 с буфера против подтормаживаний CDN
   ":adaptive-logic=highest",  -- не переключать качество на лету
   ":no-ts-trust-pcr",         -- не доверять PCR: лечит пропажу звука на разрывах
