@@ -3,17 +3,12 @@ local json = require("dkjson")
 local LOG = "VKPlay: "
 local unpack = table.unpack or unpack
 
-local REFERER = "https://live.vkvideo.ru/"
-local UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "..
-           "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-
 -- Порядок предпочтения типов потоков
 local LIVE_TYPES   = { "live_hls", "live_playback_hls", "hls" }
 local RECORD_TYPES = { "full_hd", "high", "hls", "medium", "low", "lowest", "tiny" }
 
 -- Опции, которые VLC применит к элементу плейлиста
--- ВАЖНО: не подменять User-Agent/Referer — ссылка подписана (sig) под
--- агента, который запрашивал API (стандартный UA VLC), иначе CDN вернёт 400.
+-- ВАЖНО: не подменять User-Agent/Referer — ссылка подписана (sig) под агента, который запрашивал API (стандартный UA VLC), иначе CDN вернёт 400.
 -- LIVE: качество не фиксируем — адаптивный модуль сам меняет битрейт
 local LIVE_OPTIONS = {
   ":network-caching=10000",   -- 10 с буфера против подтормаживаний CDN
