@@ -14,10 +14,17 @@ local RECORD_TYPES = { "full_hd", "high", "hls", "medium", "low", "lowest", "tin
 -- Опции, которые VLC применит к элементу плейлиста
 -- ВАЖНО: не подменять User-Agent/Referer — ссылка подписана (sig) под
 -- агента, который запрашивал API (стандартный UA VLC), иначе CDN вернёт 400.
-local ITEM_OPTIONS = {
+-- LIVE: качество не фиксируем — адаптивный модуль сам меняет битрейт
+local LIVE_OPTIONS = {
   ":network-caching=10000",   -- 10 с буфера против подтормаживаний CDN
-  ":adaptive-logic=highest",  -- не переключать качество на лету
   ":no-ts-trust-pcr",         -- не доверять PCR: лечит пропажу звука на разрывах
+}
+
+-- Записи: дополнительно держим максимальное качество
+local RECORD_OPTIONS = {
+  ":network-caching=10000",
+  ":no-ts-trust-pcr",
+  ":adaptive-logic=highest",
 }
 
 
@@ -99,7 +106,7 @@ local function broadcast(channel)
     name        = container.title,
     artist      = container.user and container.user.nick,
     description = container.category and container.category.title,
-    options     = ITEM_OPTIONS,
+    options     = LIVE_OPTIONS,
   }
 end
 
@@ -120,7 +127,7 @@ local function records(channel, record_id)
     name        = record.title,
     artist      = record.blog and record.blog.owner and record.blog.owner.displayName,
     description = record.category and record.category.title,
-    options     = ITEM_OPTIONS,
+    options     = RECORD_OPTIONS,
   }
 end
 
