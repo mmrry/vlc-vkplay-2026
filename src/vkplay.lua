@@ -8,18 +8,19 @@ local LIVE_TYPES   = { "live_hls", "live_playback_hls", "hls" }
 local RECORD_TYPES = { "full_hd", "high", "hls", "medium", "low", "lowest", "tiny" }
 
 -- Опции, которые VLC применит к элементу плейлиста
--- ВАЖНО: не подменять User-Agent/Referer — ссылка подписана (sig) под агента, который запрашивал API (стандартный UA VLC), иначе CDN вернёт 400.
+-- ВАЖНО: не подменять User-Agent/Referer — ссылка подписана (sig) под
+-- агента, который запрашивал API (стандартный UA VLC), иначе CDN вернёт 400.
 -- LIVE: качество не фиксируем — адаптивный модуль сам меняет битрейт
 local LIVE_OPTIONS = {
   ":network-caching=10000",   -- 10 с буфера против подтормаживаний CDN
   ":no-ts-trust-pcr",         -- не доверять PCR: лечит пропажу звука на разрывах
 }
 
--- Записи: дополнительно держим максимальное качество
+-- Записи отдаются одним MP4-файлом (не HLS), поэтому TS/HLS-опции тут не нужны
 local RECORD_OPTIONS = {
   ":network-caching=10000",
-  ":no-ts-trust-pcr",
-  ":adaptive-logic=highest",
+  ":codec=avcodec,any",       -- AAC через FFmpeg: faad теряет звук на SBR/сменах конфигурации
+  ":input-fast-seek",         -- перемотка на ключевой кадр без долгого preroll
 }
 
 
