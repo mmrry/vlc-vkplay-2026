@@ -31,7 +31,8 @@ if [ -n "${LUAC:-}" ]; then
   # Готовый luac нужной версии (например, для локальной проверки)
   command -v "$LUAC" >/dev/null || { echo "LUAC not found: $LUAC" >&2; exit 1; }
 else
-  TAG="$LUA_VERSION$([ "$VLC_PATCH" = 1 ] && echo -vlc)"
+  # (без "[ ... ] && echo" в подстановке: при set -e ложное условие молча завершает скрипт)
+  if [ "$VLC_PATCH" = 1 ]; then TAG="$LUA_VERSION-vlc"; else TAG="$LUA_VERSION"; fi
   SRC_ROOT="$WORK/lua-$TAG"
   if [ ! -d "$SRC_ROOT" ]; then
     rm -rf "$WORK/unpack" && mkdir -p "$WORK/unpack"
@@ -71,4 +72,6 @@ if [ -n "$SIZE_T" ]; then
   fi
 fi
 
-echo "built $OUT (Lua $LUA_VERSION$([ "$VLC_PATCH" = 1 ] && echo ' + VLC patch'), header: $HEADER)"
+NOTE=""
+if [ "$VLC_PATCH" = 1 ]; then NOTE=" + VLC patch"; fi
+echo "built $OUT (Lua $LUA_VERSION$NOTE, header: $HEADER)"
