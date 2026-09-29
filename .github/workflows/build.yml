@@ -22,7 +22,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # VLC 3.x для Windows и macOS собран со встроенным Lua 5.1
+          # VLC 3.x для Windows и macOS: встроенный Lua 5.1 с патчем VLC
+          # (размеры в байткоде 32-битные, scripts/patches/vlc3-luac-32bits.patch)
           - { target: windows, lua: 5.1.5, os: windows-latest }
           - { target: macos,   lua: 5.1.5, os: macos-latest }
           # VLC 3.x из Debian/Ubuntu слинкован с системным liblua5.2
@@ -37,7 +38,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build
-          key: luac-${{ runner.os }}-${{ matrix.lua }}-${{ hashFiles('scripts/*') }}
+          key: luac-v2-${{ runner.os }}-${{ matrix.lua }}-${{ hashFiles('scripts/**') }}
 
       - name: Build (Windows, MSVC)
         if: runner.os == 'Windows'

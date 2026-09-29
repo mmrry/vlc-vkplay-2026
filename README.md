@@ -51,6 +51,9 @@ https://live.vkvideo.ru/maddyson/record/eaacfda0-2432-4e81-8107-cb34358d3789?sha
   `powershell -ExecutionPolicy Bypass -File scripts\build.ps1` → `dist\`  
   добавьте `-Publish -Tag <версия>`, чтобы создать GitHub Release через `gh`.
 - Linux / macOS: `scripts/build.sh <версия-lua> <суффикс>`, например `scripts/build.sh 5.2.4 linux`.
+- Для Lua 5.1 (цели `windows`/`macos`) скрипты накладывают патч VLC
+  `scripts/patches/vlc3-luac-32bits.patch`: VLC 3.x хранит размеры в байткоде 32-битными,
+  и обычный `luac` 5.1 даёт файл, который VLC отвергает с `bad header in precompiled chunk`.
 - CI: при push тега собираются все файлы и публикуется Release.
 
 ## Сертификаты CDN
