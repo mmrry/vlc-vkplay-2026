@@ -5,7 +5,18 @@ local unpack = table.unpack or unpack
 
 -- Порядок предпочтения типов потоков
 local LIVE_TYPES   = { "live_hls", "live_playback_hls", "hls" }
-local RECORD_TYPES = { "full_hd", "high", "hls", "medium", "low", "lowest", "tiny" }
+
+-- Формат записей:
+--   "hls" — ondemand_hls: CDN режет MP4 на сегменты, старт почти мгновенный
+--           (не нужно качать индекс MP4, у многочасовой записи это десятки МБ);
+--   "mp4" — один MP4-файл (quad_hd/full_hd): старт тем дольше, чем длиннее запись.
+-- Если формата нет у записи, берётся следующий по списку.
+local RECORD_FORMAT = "hls"
+local MP4_TYPES = { "quad_hd", "full_hd", "high", "medium", "low", "lowest", "tiny" }
+local RECORD_TYPES = {
+  hls = { "ondemand_hls", "hls", unpack(MP4_TYPES) },
+  mp4 = { unpack(MP4_TYPES) },
+}
 
 -- Опции, которые VLC применит к элементу плейлиста
 -- ВАЖНО: не подменять User-Agent/Referer — ссылка подписана (sig) под
@@ -13,15 +24,169 @@ local RECORD_TYPES = { "full_hd", "high", "hls", "medium", "low", "lowest", "tin
 -- LIVE: качество не фиксируем — адаптивный модуль сам меняет битрейт
 local LIVE_OPTIONS = {
   ":network-caching=10000",   -- 10 с буфера против подтормаживаний CDN
+  ":codec=avcodec,any",       -- AAC через FFmpeg: faad теряет звук на SBR/сменах конфигурации
   ":no-ts-trust-pcr",         -- не доверять PCR: лечит пропажу звука на разрывах
 }
 
--- Записи отдаются одним MP4-файлом (не HLS), поэтому TS/HLS-опции тут не нужны
+-- Записи: набор опций зависит от того, какой формат реально выбран
 local RECORD_OPTIONS = {
-  ":network-caching=10000",
-  ":codec=avcodec,any",       -- AAC через FFmpeg: faad теряет звук на SBR/сменах конфигурации
-  ":input-fast-seek",         -- перемотка на ключевой кадр без долгого preroll
+  -- один MP4-файл
+  mp4 = {
+    ":network-caching=10000",
+    ":codec=avcodec,any",       -- AAC через FFmpeg: faad теряет звук на SBR/сменах конфигурации
+    ":input-fast-seek",         -- перемотка на ключевой кадр без долгого preroll
+  },
+  -- HLS (ondemand_hls)
+  hls = {
+    ":network-caching=10000",
+    ":codec=avcodec,any",
+    ":adaptive-logic=highest",  -- запись: всегда максимальное качество, без переключений
+    ":no-ts-trust-pcr",
+  },
 }
+
+
+-- Корневые сертификаты CDN VK Video Live (*.okcdn.ru и др.).
+-- На Windows их часто нет в локальном хранилище,
+-- а GnuTLS в VLC не умеет догружать корни через Windows Update.
+-- Доверие добавляется только для потоков, открытых этим скриптом
+-- (опция gnutls-dir-trust элемента), а не для системы в целом.
+-- Список обновляет scripts/cert_watch.py: из хранилища Mozilla автоматически
+-- (через PR), ручные корни — из certs/extra/ (--add-root).
+local TRUST_FILE = "vkplay-roots.pem"
+local LEGACY_TRUST_FILES = { "harica-roots.pem" }
+local TRUST_PEM = [[
+# CN=HARICA TLS ECC Root CA 2021,O=Hellenic Academic and Research Institutions CA,C=GR
+# SHA-1 BCB0C19DE9989270193857E98DA7B45D6EEE0148  notAfter 2045-02-13
+-----BEGIN CERTIFICATE-----
+MIICVDCCAdugAwIBAgIQZ3SdjXfYO2rbIvT/WeK/zjAKBggqhkjOPQQDAzBsMQsw
+CQYDVQQGEwJHUjE3MDUGA1UECgwuSGVsbGVuaWMgQWNhZGVtaWMgYW5kIFJlc2Vh
+cmNoIEluc3RpdHV0aW9ucyBDQTEkMCIGA1UEAwwbSEFSSUNBIFRMUyBFQ0MgUm9v
+dCBDQSAyMDIxMB4XDTIxMDIxOTExMDExMFoXDTQ1MDIxMzExMDEwOVowbDELMAkG
+A1UEBhMCR1IxNzA1BgNVBAoMLkhlbGxlbmljIEFjYWRlbWljIGFuZCBSZXNlYXJj
+aCBJbnN0aXR1dGlvbnMgQ0ExJDAiBgNVBAMMG0hBUklDQSBUTFMgRUNDIFJvb3Qg
+Q0EgMjAyMTB2MBAGByqGSM49AgEGBSuBBAAiA2IABDgI/rGgltJ6rK9JOtDA4MM7
+KKrxcm1lAEeIhPyaJmuqS7psBAqIXhfyVYf8MLA04jRYVxqEU+kw2anylnTDUR9Y
+STHMmE5gEYd103KUkE+bECUqqHgtvpBBWJAVcqeht6NCMEAwDwYDVR0TAQH/BAUw
+AwEB/zAdBgNVHQ4EFgQUyRtTgRL+BNUW0aq8mm+3oJUZbsowDgYDVR0PAQH/BAQD
+AgGGMAoGCCqGSM49BAMDA2cAMGQCMBHervjcToiwqfAircJRQO9gcS3ujwLEXQNw
+SaSS6sUUiHCm0w2wqsosQJz76YJumgIwK0eaB8bRwoF8yguWGEEbo/QwCZ61IygN
+nxS2PFOiTAZpffpskcYqSUXm7LcT4Tps
+-----END CERTIFICATE-----
+# CN=Hellenic Academic and Research Institutions ECC RootCA 2015,O=Hellenic Academic and Research Institutions Cert. Authority,L=Athens,C=GR
+# SHA-1 9FF1718D92D59AF37D7497B4BC6F84680BBAB666  notAfter 2040-06-30
+-----BEGIN CERTIFICATE-----
+MIICwzCCAkqgAwIBAgIBADAKBggqhkjOPQQDAjCBqjELMAkGA1UEBhMCR1IxDzAN
+BgNVBAcTBkF0aGVuczFEMEIGA1UEChM7SGVsbGVuaWMgQWNhZGVtaWMgYW5kIFJl
+c2VhcmNoIEluc3RpdHV0aW9ucyBDZXJ0LiBBdXRob3JpdHkxRDBCBgNVBAMTO0hl
+bGxlbmljIEFjYWRlbWljIGFuZCBSZXNlYXJjaCBJbnN0aXR1dGlvbnMgRUNDIFJv
+b3RDQSAyMDE1MB4XDTE1MDcwNzEwMzcxMloXDTQwMDYzMDEwMzcxMlowgaoxCzAJ
+BgNVBAYTAkdSMQ8wDQYDVQQHEwZBdGhlbnMxRDBCBgNVBAoTO0hlbGxlbmljIEFj
+YWRlbWljIGFuZCBSZXNlYXJjaCBJbnN0aXR1dGlvbnMgQ2VydC4gQXV0aG9yaXR5
+MUQwQgYDVQQDEztIZWxsZW5pYyBBY2FkZW1pYyBhbmQgUmVzZWFyY2ggSW5zdGl0
+dXRpb25zIEVDQyBSb290Q0EgMjAxNTB2MBAGByqGSM49AgEGBSuBBAAiA2IABJKg
+QehLgoRc4vgxEZmGZE4JJS+dQS8KrjVPdJWyUWRrjWvmP3CV8AVER6ZyOFB2lQJa
+jq4onvktTpnvLEhvTCUp6NFxW98dwXU3tNf6e3pCnGoKVlp8aQuqgAkkbH7BRqNC
+MEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFLQi
+C4KZJAEOnLvkDv2/+5cgk5kqMAoGCCqGSM49BAMCA2cAMGQCMGfOFmI4oqxiRaep
+lSTAGiecMjvAwNW6qef4BENThe5SId6d9SWDPp5YSy/XZxMOIQIwBeF1Ad5o7Sof
+TUwJCA3sS61kFyjndc5FZXIhF8siQQ6ME5g4mlRtm8rifOoCWCKR
+-----END CERTIFICATE-----
+# CN=Russian Trusted Root CA,O=The Ministry of Digital Development and Communications,C=RU
+# SHA-1 8FF915CCAB7BC16F8C5C8099D53E0E115B3AEC2F  notAfter 2032-02-27
+-----BEGIN CERTIFICATE-----
+MIIFwjCCA6qgAwIBAgICEAAwDQYJKoZIhvcNAQELBQAwcDELMAkGA1UEBhMCUlUx
+PzA9BgNVBAoMNlRoZSBNaW5pc3RyeSBvZiBEaWdpdGFsIERldmVsb3BtZW50IGFu
+ZCBDb21tdW5pY2F0aW9uczEgMB4GA1UEAwwXUnVzc2lhbiBUcnVzdGVkIFJvb3Qg
+Q0EwHhcNMjIwMzAxMjEwNDE1WhcNMzIwMjI3MjEwNDE1WjBwMQswCQYDVQQGEwJS
+VTE/MD0GA1UECgw2VGhlIE1pbmlzdHJ5IG9mIERpZ2l0YWwgRGV2ZWxvcG1lbnQg
+YW5kIENvbW11bmljYXRpb25zMSAwHgYDVQQDDBdSdXNzaWFuIFRydXN0ZWQgUm9v
+dCBDQTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAMfFOZ8pUAL3+r2n
+qqE0Zp52selXsKGFYoG0GM5bwz1bSFtCt+AZQMhkWQheI3poZAToYJu69pHLKS6Q
+XBiwBC1cvzYmUYKMYZC7jE5YhEU2bSL0mX7NaMxMDmH2/NwuOVRj8OImVa5s1F4U
+zn4Kv3PFlDBjjSjXKVY9kmjUBsXQrIHeaqmUIsPIlNWUnimXS0I0abExqkbdrXbX
+YwCOXhOO2pDUx3ckmJlCMUGacUTnylyQW2VsJIyIGA8V0xzdaeUXg0VZ6ZmNUr5Y
+Ber/EAOLPb8NYpsAhJe2mXjMB/J9HNsoFMBFJ0lLOT/+dQvjbdRZoOT8eqJpWnVD
+U+QL/qEZnz57N88OWM3rabJkRNdU/Z7x5SFIM9FrqtN8xewsiBWBI0K6XFuOBOTD
+4V08o4TzJ8+Ccq5XlCUW2L48pZNCYuBDfBh7FxkB7qDgGDiaftEkZZfApRg2E+M9
+G8wkNKTPLDc4wH0FDTijhgxR3Y4PiS1HL2Zhw7bD3CbslmEGgfnnZojNkJtcLeBH
+BLa52/dSwNU4WWLubaYSiAmA9IUMX1/RpfpxOxd4Ykmhz97oFbUaDJFipIggx5sX
+ePAlkTdWnv+RWBxlJwMQ25oEHmRguNYf4Zr/Rxr9cS93Y+mdXIZaBEE0KS2iLRqa
+OiWBki9IMQU4phqPOBAaG7A+eP8PAgMBAAGjZjBkMB0GA1UdDgQWBBTh0YHlzlpf
+BKrS6badZrHF+qwshzAfBgNVHSMEGDAWgBTh0YHlzlpfBKrS6badZrHF+qwshzAS
+BgNVHRMBAf8ECDAGAQH/AgEEMA4GA1UdDwEB/wQEAwIBhjANBgkqhkiG9w0BAQsF
+AAOCAgEAALIY1wkilt/urfEVM5vKzr6utOeDWCUczmWX/RX4ljpRdgF+5fAIS4vH
+tmXkqpSCOVeWUrJV9QvZn6L227ZwuE15cWi8DCDal3Ue90WgAJJZMfTshN4OI8cq
+W9E4EG9wglbEtMnObHlms8F3CHmrw3k6KmUkWGoa+/ENmcVl68u/cMRl1JbW2bM+
+/3A+SAg2c6iPDlehczKx2oa95QW0SkPPWGuNA/CE8CpyANIhu9XFrj3RQ3EqeRcS
+AQQod1RNuHpfETLU/A2gMmvn/w/sx7TB3W5BPs6rprOA37tutPq9u6FTZOcG1Oqj
+C/B7yTqgI7rbyvox7DEXoX7rIiEqyNNUguTk/u3SZ4VXE2kmxdmSh3TQvybfbnXV
+4JbCZVaqiZraqc7oZMnRoWrXRG3ztbnbes/9qhRGI7PqXqeKJBztxRTEVj8ONs1d
+WN5szTwaPIvhkhO3CO5ErU2rVdUr89wKpNXbBODFKRtgxUT70YpmJ46VVaqdAhOZ
+D9EUUn4YaeLaS8AjSF/h7UkjOibNc4qVDiPP+rkehFWM66PVnP1Msh93tc+taIfC
+EYVMxjh8zNbFuoc7fzvvrFILLe7ifvEIUqSVIC/AzplM/Jxw7buXFeGP1qVCBEHq
+391d/9RAfaZ12zkwFsl+IKwE/OZxW8AHa9i1p4GO0YSNuczzEm4=
+-----END CERTIFICATE-----
+]]
+
+
+local function trust_dir()
+  if package.config:sub(1, 1) == "\\" then
+    local appdata = os.getenv("APPDATA")
+    return appdata and (appdata.."\\vlc\\vkplay-certs"), "\\", true
+  end
+  local base = os.getenv("XDG_DATA_HOME") or ((os.getenv("HOME") or "").."/.local/share")
+  return base.."/vlc/vkplay-certs", "/", false
+end
+
+
+-- Кладёт PEM в отдельный каталог (однократно) и возвращает путь к нему
+local function ensure_trust_dir()
+  if not (io and os and package) then return nil end
+
+  local dir, sep, is_windows = trust_dir()
+  if not dir then return nil end
+  local path = dir..sep..TRUST_FILE
+
+  local f = io.open(path, "rb")
+  if f then
+    local current = f:read("*a")
+    f:close()
+    if current == TRUST_PEM then return dir end
+  end
+
+  f = io.open(path, "wb")
+  if not f then
+    if is_windows then
+      os.execute('mkdir "'..dir..'" 2>nul')
+    else
+      os.execute("mkdir -p '"..dir.."'")
+    end
+    f = io.open(path, "wb")
+  end
+  if not f then
+    vlc.msg.warn(LOG.."cannot write "..path)
+    return nil
+  end
+
+  f:write(TRUST_PEM)
+  f:close()
+  for _, name in ipairs(LEGACY_TRUST_FILES) do
+    os.remove(dir..sep..name)
+  end
+  vlc.msg.info(LOG.."trusted roots written to "..path)
+  return dir
+end
+
+
+-- Копия набора опций + каталог доверия GnuTLS
+local function with_trust(options)
+  local out = {}
+  for i, o in ipairs(options) do out[i] = o end
+  local dir = ensure_trust_dir()
+  if dir then table.insert(out, ":gnutls-dir-trust="..dir) end
+  return out
+end
 
 
 local function match_all(str, pattern)
@@ -77,12 +242,125 @@ local function pick_url(player_urls, prefs)
   for _, t in ipairs(prefs) do
     if by_type[t] then
       vlc.msg.info(LOG.."using stream type: "..t)
-      return by_type[t]
+      return by_type[t], t, by_type
     end
   end
 
   vlc.msg.err(LOG.."no suitable stream type found")
   return nil
+end
+
+
+-- ---------------------------------------------------------------------------
+-- Записи в HLS (ondemand_hls): выбор варианта
+--
+-- VLC при adaptive-logic=highest берёт вариант с наибольшим (AVERAGE-)BANDWIDTH,
+-- а у CDN VK эти числа не соответствуют качеству: 720p объявлен «тяжелее» 1080p/1440p
+-- Поэтому master-плейлист разбираем сами (второй этап parse,
+-- VLC к этому моменту уже открыл master с нашим gnutls-dir-trust) и выбираем
+-- по разрешению, затем по уровню H.264, затем по битрейту.
+-- ---------------------------------------------------------------------------
+
+-- Известные домены CDN записей (встречались: *.okcdn.ru, *.vkuser.net)
+local CDN_DOMAINS = { "okcdn%.ru", "vkuser%.net" }
+
+
+local function is_ondemand_master()
+  local host = vlc.path:match("^([%w%.%-]+)/.-/ondemand/hls4_[^/?#]*%.m3u8")
+  if not host then return false end
+  for _, d in ipairs(CDN_DOMAINS) do
+    if host:match("%."..d.."$") then return true end
+  end
+  -- Новый домен CDN: доверяем, только если элемент создан нашим первым этапом
+  -- (у него есть опция :meta-url с запасной ссылкой на MP4)
+  local ok, marker = pcall(vlc.var.inherit, nil, "meta-url")
+  return ok and marker ~= nil and marker ~= ""
+end
+
+
+local function hls_attr(line, name)
+  return line:match("[:,]"..name.."=\"([^\"]*)\"") or line:match("[:,]"..name.."=([^,]*)")
+end
+
+
+-- avc1.PPCCLL -> LL (уровень H.264: 0x1f=3.1 720p, 0x2a=4.2 1080p, 0x33=5.1 1440p)
+local function avc_level(codecs)
+  local level = codecs and codecs:match("avc1%.%x%x%x%x(%x%x)")
+  return level and tonumber(level, 16) or 0
+end
+
+
+local function better(a, b)
+  for i = 1, #a do
+    if a[i] ~= b[i] then return a[i] > b[i] end
+  end
+  return false
+end
+
+
+local function inherit(name)
+  local ok, value = pcall(vlc.var.inherit, nil, name)
+  if ok and value and value ~= "" then return value end
+  return nil
+end
+
+
+local function ondemand_variant()
+  local base = vlc.access.."://"..(vlc.path:gsub("[?#].*$", ""):gsub("[^/]*$", ""))
+  local best_uri, best_key, pending
+
+  while true do
+    local line = vlc.readline()
+    if not line then break end
+    line = line:gsub("\r$", "")
+    if line:match("^#EXT%-X%-STREAM%-INF:") then
+      pending = line
+    elseif pending and line ~= "" and not line:match("^#") then
+      local w, h = (hls_attr(pending, "RESOLUTION") or ""):match("(%d+)x(%d+)")
+      local key = {
+        tonumber(h) or 0,
+        avc_level(hls_attr(pending, "CODECS")),
+        tonumber(hls_attr(pending, "AVERAGE-BANDWIDTH") or hls_attr(pending, "BANDWIDTH")) or 0,
+      }
+      vlc.msg.dbg(LOG.."variant "..(w or "?").."x"..(h or "?").." level="..key[2].." bw="..key[3])
+      if not best_key or better(key, best_key) then
+        best_uri, best_key = line, key
+      end
+      pending = nil
+    end
+  end
+
+  local item = {
+    name        = inherit("meta-title"),
+    artist      = inherit("meta-artist"),
+    description = inherit("meta-description"),
+  }
+
+  if best_uri then
+    item.path = best_uri:match("^https?://") and best_uri or base..best_uri
+    item.options = with_trust(RECORD_OPTIONS.hls)
+    vlc.msg.info(LOG.."selected HLS variant: height="..best_key[1].." level="..best_key[2]
+                 .." bw="..best_key[3])
+    return item
+  end
+
+  -- master не разобрался: запасной вариант — MP4 той же записи
+  local mp4 = inherit("meta-url")
+  if not mp4 then
+    vlc.msg.err(LOG.."no variants in HLS master and no MP4 fallback")
+    return nil
+  end
+  vlc.msg.warn(LOG.."no variants in HLS master, falling back to MP4")
+  item.path = mp4
+  item.options = with_trust(RECORD_OPTIONS.mp4)
+  return item
+end
+
+
+local function copy(t)
+  local out = {}
+  for i, v in ipairs(t) do out[i] = v end
+  return out
 end
 
 
@@ -102,7 +380,7 @@ local function broadcast(channel)
     name        = container.title,
     artist      = container.user and container.user.nick,
     description = container.category and container.category.title,
-    options     = LIVE_OPTIONS,
+    options     = with_trust(LIVE_OPTIONS),
   }
 end
 
@@ -115,15 +393,38 @@ local function records(channel, record_id)
     return nil
   end
 
-  local url = pick_url(record.data[1].playerUrls, RECORD_TYPES)
+  local url, kind, by_type = pick_url(record.data[1].playerUrls, RECORD_TYPES[RECORD_FORMAT] or RECORD_TYPES.hls)
   if not url then return nil end
+
+  local title = record.title
+  local artist = record.blog and record.blog.owner and record.blog.owner.displayName
+  local description = record.category and record.category.title
+
+  local options
+  if kind == "ondemand_hls" then
+    -- второй этап (ondemand_variant) прочитает эти опции через vlc.var.inherit
+    options = copy(RECORD_OPTIONS.hls)
+    if title then table.insert(options, ":meta-title="..title) end
+    if artist then table.insert(options, ":meta-artist="..artist) end
+    if description then table.insert(options, ":meta-description="..description) end
+    for _, t in ipairs(MP4_TYPES) do
+      if by_type[t] then
+        table.insert(options, ":meta-url="..by_type[t])
+        break
+      end
+    end
+  elseif kind:find("hls", 1, true) then
+    options = RECORD_OPTIONS.hls
+  else
+    options = RECORD_OPTIONS.mp4
+  end
 
   return {
     path        = url,
-    name        = record.title,
-    artist      = record.blog and record.blog.owner and record.blog.owner.displayName,
-    description = record.category and record.category.title,
-    options     = RECORD_OPTIONS,
+    name        = title,
+    artist      = artist,
+    description = description,
+    options     = with_trust(options),
   }
 end
 
@@ -132,12 +433,18 @@ function probe()
   return (vlc.access == "http" or vlc.access == "https") and (
     vlc.path:match("^vkplay%.live/.+") or
     vlc.path:match("^live%.vkplay%.ru/.+") or
-    vlc.path:match("^live%.vkvideo%.ru/.+")
+    vlc.path:match("^live%.vkvideo%.ru/.+") or
+    is_ondemand_master()
   )
 end
 
 
 function parse()
+  if is_ondemand_master() then
+    local item = ondemand_variant()
+    return item and { item } or {}
+  end
+
   local channel, _, record_id = match_all(vlc.path, "/([^/?#]+)")
 
   local item
