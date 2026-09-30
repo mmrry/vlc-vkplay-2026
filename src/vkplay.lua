@@ -12,11 +12,14 @@ local LIVE_TYPES   = { "live_hls", "live_playback_hls", "hls" }
 --   "mp4" — один MP4-файл (quad_hd/full_hd): старт тем дольше, чем длиннее запись.
 -- Если формата нет у записи, берётся следующий по списку.
 local RECORD_FORMAT = "hls"
-local MP4_TYPES = { "quad_hd", "full_hd", "high", "medium", "low", "lowest", "tiny" }
+local MP4_TYPES = { "ultra_hd", "quad_hd", "full_hd", "high", "medium", "low", "lowest", "tiny" }
 local RECORD_TYPES = {
   hls = { "ondemand_hls", "hls", unpack(MP4_TYPES) },
   mp4 = { unpack(MP4_TYPES) },
 }
+-- Клипы: HLS. В прямом MP4 клипа первые 2-3 секунды — чёрный экран,
+-- поэтому MP4 только запасной вариант, если HLS у клипа нет
+local CLIP_TYPES = { "hls", unpack(MP4_TYPES) }
 
 -- Опции, которые VLC применит к элементу плейлиста
 -- ВАЖНО: не подменять User-Agent/Referer — ссылка подписана (sig) под
@@ -265,16 +268,25 @@ end
 local CDN_DOMAINS = { "okcdn%.ru", "vkuser%.net" }
 
 
-local function is_ondemand_master()
-  local host = vlc.path:match("^([%w%.%-]+)/.-/ondemand/hls4_[^/?#]*%.m3u8")
-  if not host then return false end
-  for _, d in ipairs(CDN_DOMAINS) do
-    if host:match("%."..d.."$") then return true end
-  end
-  -- Новый домен CDN: доверяем, только если элемент создан нашим первым этапом
-  -- (у него есть опция :meta-url с запасной ссылкой на MP4)
+local function has_marker()
   local ok, marker = pcall(vlc.var.inherit, nil, "meta-url")
   return ok and marker ~= nil and marker ~= ""
+end
+
+
+-- Второй этап выбора варианта HLS:
+--   * master записи  …/ondemand/hls4_*.m3u8 на известном CDN;
+--   * любой .m3u8 элемента, созданного нашим первым этапом (метка :meta-url) —
+--     записи на новом CDN и HLS клипов (video.m3u8?cmd=videoPlayerCdn).
+-- Выбранный вариант отдаётся без :meta-url, поэтому повторно этап не сработает.
+local function is_ondemand_master()
+  local host = vlc.path:match("^([%w%.%-]+)/.-/ondemand/hls4_[^/?#]*%.m3u8")
+  if host then
+    for _, d in ipairs(CDN_DOMAINS) do
+      if host:match("%."..d.."$") then return true end
+    end
+  end
+  return vlc.path:match("^[%w%.%-]+/[^?#]-%.m3u8") ~= nil and has_marker()
 end
 
 
@@ -305,6 +317,20 @@ local function inherit(name)
 end
 
 
+-- Ссылка из плейлиста -> абсолютный URL (RFC 3986, без ../):
+--   https://h/p  — как есть;   //h/p — схема master;
+--   /p           — от корня хоста master (так у клипов);   p — от каталога master
+local function resolve_url(ref)
+  if ref:match("^%a[%w+.-]*://") then return ref end
+  local scheme = vlc.access
+  local host = vlc.path:match("^([^/?#]+)") or ""
+  if ref:sub(1, 2) == "//" then return scheme..":"..ref end
+  if ref:sub(1, 1) == "/" then return scheme.."://"..host..ref end
+  local dir = vlc.path:gsub("[?#].*$", ""):gsub("[^/]*$", "")
+  return scheme.."://"..dir..ref
+end
+
+
 -- Метка времени первого этапа (:start-time) переносится на выбранный вариант
 local function with_start(options)
   local out = {}
@@ -316,13 +342,16 @@ end
 
 
 local function ondemand_variant()
-  local base = vlc.access.."://"..(vlc.path:gsub("[?#].*$", ""):gsub("[^/]*$", ""))
   local best_uri, best_key, pending
+  local media_playlist = false   -- #EXTINF без #EXT-X-STREAM-INF: это не master
 
   while true do
     local line = vlc.readline()
     if not line then break end
     line = line:gsub("\r$", "")
+    if line:match("^#EXTINF:") then
+      media_playlist = true
+    end
     if line:match("^#EXT%-X%-STREAM%-INF:") then
       pending = line
     elseif pending and line ~= "" and not line:match("^#") then
@@ -347,10 +376,19 @@ local function ondemand_variant()
   }
 
   if best_uri then
-    item.path = best_uri:match("^https?://") and best_uri or base..best_uri
+    item.path = resolve_url(best_uri)
     item.options = with_trust(with_start(RECORD_OPTIONS.hls))
     vlc.msg.info(LOG.."selected HLS variant: height="..best_key[1].." level="..best_key[2]
                  .." bw="..best_key[3])
+    return item
+  end
+
+  -- Не master, а плейлист сегментов (один вариант): отдаём его VLC как есть.
+  -- Без :meta-url, поэтому второй этап на нём не сработает повторно.
+  if media_playlist then
+    item.path = vlc.access.."://"..vlc.path
+    item.options = with_trust(with_start(RECORD_OPTIONS.hls))
+    vlc.msg.info(LOG.."single-variant HLS playlist, playing as is")
     return item
   end
 
@@ -423,18 +461,23 @@ end
 --   obj: объект API/страницы с полями title, data[1].playerUrls, blog/user, category
 -- ---------------------------------------------------------------------------
 
-local function vod_item(obj, start)
+local function vod_item(obj, start, types)
   local player_urls = obj.data and obj.data[1] and obj.data[1].playerUrls or obj.playerUrls
-  local url, kind, by_type = pick_url(player_urls, RECORD_TYPES[RECORD_FORMAT] or RECORD_TYPES.hls)
+  local url, kind, by_type = pick_url(player_urls, types or RECORD_TYPES[RECORD_FORMAT] or RECORD_TYPES.hls)
   if not url then return nil end
 
-  local owner = (obj.blog and obj.blog.owner) or obj.user or obj.author or {}
-  local title = obj.title
+  -- blog.owner — стример; author у клипа — тот, кто его нарезал
+  local owner = (obj.blog and obj.blog.owner) or obj.user or {}
+  local title = obj.title and obj.title:gsub("%s+$", "")
   local artist = owner.displayName or owner.nick
   local description = obj.category and obj.category.title
+  local clipper = obj.author and (obj.author.displayName or obj.author.nick)
+  if clipper and clipper ~= artist then
+    description = (description and description.." · " or "").."клип: "..clipper
+  end
 
   local options
-  if kind == "ondemand_hls" then
+  if kind == "ondemand_hls" or kind == "hls" then
     -- второй этап (ondemand_variant) прочитает эти опции через vlc.var.inherit
     options = copy(RECORD_OPTIONS.hls)
     if title then table.insert(options, ":meta-title="..title) end
@@ -481,9 +524,10 @@ end
 -- ---------------------------------------------------------------------------
 -- Клипы (моменты): live.vkvideo.ru/<channel>/clip/<id>
 --
--- Основной источник — JSON состояния страницы (<script id="initial-state">),
--- которую VLC уже скачал до вызова parse(): лишних запросов нет. Объект клипа
--- ищется по его id. Если на странице его нет — запасные запросы к API.
+-- Отдельного API для клипов нет: и сайт, и плагин берут данные из JSON состояния
+-- страницы (<script id='initial-state'>, путь videoClips.currentVideoClip.data),
+-- которую VLC уже скачал до вызова parse() — лишних запросов нет.
+-- Объект клипа ищется по id, поэтому смена пути в JSON плагин не сломает.
 -- ---------------------------------------------------------------------------
 
 local function read_page()
@@ -517,7 +561,8 @@ end
 
 local function clip_from_page(clip_id)
   local html = read_page()
-  local state = html:match('<script[^>]-id="initial%-state"[^>]*>(.-)</script>')
+  -- тег вида <script type='text/plain' id='initial-state'> (кавычки любые)
+  local state = html:match("<script[^>]-id=[\"']initial%-state[\"'][^>]*>(.-)</script>")
   if not state then
     vlc.msg.dbg(LOG.."initial-state not found in page ("..#html.." bytes)")
     return nil
@@ -537,34 +582,13 @@ local function clip_from_page(clip_id)
 end
 
 
--- Запасной путь: API (по аналогии с записями; эндпоинт клипов не документирован)
-local CLIP_API_PATHS = {
-  "%s/public_video_stream/clip/%s",
-  "%s/clip/%s",
-}
-
-
-local function clip_from_api(channel, clip_id)
-  for _, fmt in ipairs(CLIP_API_PATHS) do
-    local container = api_call(fmt:format(channel, clip_id))
-    local data = container and container.data
-    local found = data and (data.clip or data)
-    if type(found) == "table" and has_player_urls(found) then
-      vlc.msg.info(LOG.."clip via API: "..fmt:format(channel, clip_id))
-      return found
-    end
-  end
-  return nil
-end
-
-
 local function clip(channel, clip_id, start)
-  local found = clip_from_page(clip_id) or clip_from_api(channel, clip_id)
+  local found = clip_from_page(clip_id)
   if not found then
-    vlc.msg.err(LOG.."Clip not found: "..clip_id)
+    vlc.msg.err(LOG.."Clip not found: "..channel.."/clip/"..clip_id)
     return nil
   end
-  return vod_item(found, start)
+  return vod_item(found, start, CLIP_TYPES)
 end
 
 
