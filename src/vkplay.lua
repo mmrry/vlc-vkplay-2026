@@ -305,6 +305,16 @@ local function inherit(name)
 end
 
 
+-- Метка времени первого этапа (:start-time) переносится на выбранный вариант
+local function with_start(options)
+  local out = {}
+  for i, o in ipairs(options) do out[i] = o end
+  local start = tonumber(inherit("start-time"))
+  if start and start > 0 then table.insert(out, ":start-time="..start) end
+  return out
+end
+
+
 local function ondemand_variant()
   local base = vlc.access.."://"..(vlc.path:gsub("[?#].*$", ""):gsub("[^/]*$", ""))
   local best_uri, best_key, pending
@@ -338,7 +348,7 @@ local function ondemand_variant()
 
   if best_uri then
     item.path = best_uri:match("^https?://") and best_uri or base..best_uri
-    item.options = with_trust(RECORD_OPTIONS.hls)
+    item.options = with_trust(with_start(RECORD_OPTIONS.hls))
     vlc.msg.info(LOG.."selected HLS variant: height="..best_key[1].." level="..best_key[2]
                  .." bw="..best_key[3])
     return item
@@ -352,7 +362,7 @@ local function ondemand_variant()
   end
   vlc.msg.warn(LOG.."no variants in HLS master, falling back to MP4")
   item.path = mp4
-  item.options = with_trust(RECORD_OPTIONS.mp4)
+  item.options = with_trust(with_start(RECORD_OPTIONS.mp4))
   return item
 end
 
@@ -385,20 +395,43 @@ local function broadcast(channel)
 end
 
 
-local function records(channel, record_id)
-  local container = api_call(channel.."/public_video_stream/record/"..record_id)
-  local record = container and container.data and container.data.record
-  if not record or not record.data or not record.data[1] then
-    vlc.msg.err(LOG.."Record not found: "..record_id)
-    return nil
-  end
+-- ---------------------------------------------------------------------------
+-- Метка времени: ?tc=1928 (секунды) или ?t=1h2m3s / ?t=90
+-- ---------------------------------------------------------------------------
 
-  local url, kind, by_type = pick_url(record.data[1].playerUrls, RECORD_TYPES[RECORD_FORMAT] or RECORD_TYPES.hls)
+local function start_time()
+  local query = vlc.path:match("%?(.*)$")
+  if not query then return nil end
+  for key, value in query:gmatch("([^&=]+)=([^&#]*)") do
+    if key == "tc" or key == "t" then
+      local seconds = tonumber(value)
+      if not seconds and value:match("^%d+[hms]") and value:match("^[%dhms]+$") then
+        -- 1h2m3s / 5m / 90s: каждое число берётся по своему суффиксу
+        seconds = (tonumber(value:match("(%d+)h")) or 0) * 3600
+                + (tonumber(value:match("(%d+)m")) or 0) * 60
+                + (tonumber(value:match("(%d+)s")) or 0)
+      end
+      if seconds and seconds > 0 then return seconds end
+    end
+  end
+  return nil
+end
+
+
+-- ---------------------------------------------------------------------------
+-- Запись или клип -> элемент плейлиста
+--   obj: объект API/страницы с полями title, data[1].playerUrls, blog/user, category
+-- ---------------------------------------------------------------------------
+
+local function vod_item(obj, start)
+  local player_urls = obj.data and obj.data[1] and obj.data[1].playerUrls or obj.playerUrls
+  local url, kind, by_type = pick_url(player_urls, RECORD_TYPES[RECORD_FORMAT] or RECORD_TYPES.hls)
   if not url then return nil end
 
-  local title = record.title
-  local artist = record.blog and record.blog.owner and record.blog.owner.displayName
-  local description = record.category and record.category.title
+  local owner = (obj.blog and obj.blog.owner) or obj.user or obj.author or {}
+  local title = obj.title
+  local artist = owner.displayName or owner.nick
+  local description = obj.category and obj.category.title
 
   local options
   if kind == "ondemand_hls" then
@@ -414,9 +447,14 @@ local function records(channel, record_id)
       end
     end
   elseif kind:find("hls", 1, true) then
-    options = RECORD_OPTIONS.hls
+    options = copy(RECORD_OPTIONS.hls)
   else
-    options = RECORD_OPTIONS.mp4
+    options = copy(RECORD_OPTIONS.mp4)
+  end
+
+  if start then
+    table.insert(options, ":start-time="..start)
+    vlc.msg.info(LOG.."start time: "..start.." s")
   end
 
   return {
@@ -426,6 +464,107 @@ local function records(channel, record_id)
     description = description,
     options     = with_trust(options),
   }
+end
+
+
+local function records(channel, record_id, start)
+  local container = api_call(channel.."/public_video_stream/record/"..record_id)
+  local record = container and container.data and container.data.record
+  if not record or not record.data or not record.data[1] then
+    vlc.msg.err(LOG.."Record not found: "..record_id)
+    return nil
+  end
+  return vod_item(record, start)
+end
+
+
+-- ---------------------------------------------------------------------------
+-- Клипы (моменты): live.vkvideo.ru/<channel>/clip/<id>
+--
+-- Основной источник — JSON состояния страницы (<script id="initial-state">),
+-- которую VLC уже скачал до вызова parse(): лишних запросов нет. Объект клипа
+-- ищется по его id. Если на странице его нет — запасные запросы к API.
+-- ---------------------------------------------------------------------------
+
+local function read_page()
+  local chunks = {}
+  while true do
+    local chunk = vlc.read(65536)
+    if not chunk or chunk == "" then break end
+    table.insert(chunks, chunk)
+  end
+  return table.concat(chunks)
+end
+
+
+local function has_player_urls(t)
+  local urls = (t.data and type(t.data) == "table" and t.data[1] and t.data[1].playerUrls) or t.playerUrls
+  return type(urls) == "table" and next(urls) ~= nil
+end
+
+
+-- Обход JSON в глубину: объект с id == clip_id и непустыми playerUrls
+local function find_by_id(node, id, depth)
+  if type(node) ~= "table" or depth > 12 then return nil end
+  if node.id == id and has_player_urls(node) then return node end
+  for _, child in pairs(node) do
+    local found = find_by_id(child, id, depth + 1)
+    if found then return found end
+  end
+  return nil
+end
+
+
+local function clip_from_page(clip_id)
+  local html = read_page()
+  local state = html:match('<script[^>]-id="initial%-state"[^>]*>(.-)</script>')
+  if not state then
+    vlc.msg.dbg(LOG.."initial-state not found in page ("..#html.." bytes)")
+    return nil
+  end
+  local data = json.decode(state)
+  if type(data) ~= "table" then
+    vlc.msg.dbg(LOG.."initial-state is not valid JSON")
+    return nil
+  end
+  local found = find_by_id(data, clip_id, 0)
+  if not found then
+    local keys = {}
+    for k in pairs(data) do table.insert(keys, tostring(k)) end
+    vlc.msg.dbg(LOG.."clip "..clip_id.." not in initial-state, top keys: "..table.concat(keys, ","))
+  end
+  return found
+end
+
+
+-- Запасной путь: API (по аналогии с записями; эндпоинт клипов не документирован)
+local CLIP_API_PATHS = {
+  "%s/public_video_stream/clip/%s",
+  "%s/clip/%s",
+}
+
+
+local function clip_from_api(channel, clip_id)
+  for _, fmt in ipairs(CLIP_API_PATHS) do
+    local container = api_call(fmt:format(channel, clip_id))
+    local data = container and container.data
+    local found = data and (data.clip or data)
+    if type(found) == "table" and has_player_urls(found) then
+      vlc.msg.info(LOG.."clip via API: "..fmt:format(channel, clip_id))
+      return found
+    end
+  end
+  return nil
+end
+
+
+local function clip(channel, clip_id, start)
+  local found = clip_from_page(clip_id) or clip_from_api(channel, clip_id)
+  if not found then
+    vlc.msg.err(LOG.."Clip not found: "..clip_id)
+    return nil
+  end
+  return vod_item(found, start)
 end
 
 
@@ -445,13 +584,16 @@ function parse()
     return item and { item } or {}
   end
 
-  local channel, _, record_id = match_all(vlc.path, "/([^/?#]+)")
+  local channel, kind, id = match_all(vlc.path, "/([^/?#]+)")
+  local start = start_time()
 
   local item
-  if not record_id then
-    item = broadcast(channel)
+  if kind == "record" and id then
+    item = records(channel, id, start)
+  elseif kind == "clip" and id then
+    item = clip(channel, id, start)
   else
-    item = records(channel, record_id)
+    item = broadcast(channel)
   end
 
   return item and { item } or {}
