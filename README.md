@@ -4,7 +4,7 @@
 Плагин (playlist-скрипт) для VLC, позволяющий смотреть трансляции и записи [VK Видео Live](https://live.vkvideo.ru/).
 
 ## TODO:
-VLC v4
+VLC v4 Lua 5.4
 
 ## Установка
 1. Скачайте файл для вашей версии VLC со страницы [Releases](../../releases):
