@@ -3,6 +3,9 @@
 # VLC-VKPlay
 Плагин (playlist-скрипт) для VLC, позволяющий смотреть трансляции и записи [VK Видео Live](https://live.vkvideo.ru/).
 
+## TODO:
+VLC v4
+
 ## Установка
 1. Скачайте файл для вашей версии VLC со страницы [Releases](../../releases):
 
